@@ -28,6 +28,26 @@ target_link_libraries(
 )
 target_compile_definitions(training_benchmark PRIVATE LEARNING_TO_FLY_IN_SECONDS_BENCHMARK)
 
+# ============================================================
+# PPO Training Targets
+# ============================================================
+add_executable(training_ppo_headless training_ppo.cpp)
+target_link_libraries(
+        training_ppo_headless
+        PRIVATE
+        rl_tools
+        learning_to_fly
+)
+
+add_executable(training_ppo_benchmark training_ppo.cpp)
+target_link_libraries(
+        training_ppo_benchmark
+        PRIVATE
+        rl_tools
+        learning_to_fly
+)
+target_compile_definitions(training_ppo_benchmark PRIVATE LEARNING_TO_FLY_IN_SECONDS_BENCHMARK)
+
 if(RL_TOOLS_ENABLE_HDF5)
 add_executable(ablation_study ablation_study.cpp)
 target_link_libraries(

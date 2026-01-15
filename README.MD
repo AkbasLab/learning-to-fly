@@ -210,6 +210,108 @@ python3 scripts/trigger.py --mode trajectory_tracking --trajectory-scale 0.3
  Note: If you moved the Crazyflie it is best to restart it before flying (in the same position and orientation as for the intended take-off) because the policy targets to regulate the global yaw to `0`. If there is a large offset (e.g. `>90 degree`) this might trigger a strong response. 
 
 
+## PPO Training
+
+This repository also supports training with Proximal Policy Optimization (PPO) as an alternative to the default TD3 algorithm.
+
+### PPO Overview
+
+PPO is an on-policy actor-critic algorithm that uses clipped surrogate objectives for stable policy updates. Key differences from TD3:
+
+| Feature | TD3 | PPO |
+|---------|-----|-----|
+| Policy type | Deterministic | Stochastic (Gaussian) |
+| Data usage | Off-policy (replay buffer) | On-policy (rollout buffer) |
+| Update mechanism | Continuous learning | Batch updates after rollout |
+| Sample efficiency | Higher | Lower (but often more stable) |
+
+### Running PPO Training
+
+Build the PPO training targets:
+```bash
+cd build
+cmake --build . -j8
+```
+
+Run PPO training:
+```bash
+# Headless training with logging
+./build/src/training_ppo_headless
+
+# Benchmark mode (no logging/checkpointing)
+./build/src/training_ppo_benchmark
+```
+
+Checkpoints are saved to `checkpoints/multirotor_ppo/<run_name>/`.
+
+### PPO Implementation Details
+
+The PPO implementation follows the standard formulation:
+
+1. **Policy Network (Actor)**: Same MLP architecture as TD3 (64-64 hidden units, `tanh` activation). During training, outputs are used as the mean of a Gaussian distribution. At deployment, the mean action is used directly (deterministic inference).
+
+2. **Value Network (Critic)**: Separate MLP estimating V(s). Used only during training for advantage computation.
+
+3. **Action Distribution**: Diagonal Gaussian with learnable standard deviation per action dimension.
+
+4. **Advantage Estimation**: Generalized Advantage Estimation (GAE) with configurable λ parameter.
+
+5. **PPO Update**: Clipped surrogate objective with optional value function clipping and entropy bonus.
+
+### PPO Hyperparameters
+
+Key hyperparameters in `src/config/ppo_config.h`:
+
+```cpp
+// Core PPO parameters
+CLIP_EPSILON = 0.2         // Surrogate clipping range
+GAE_LAMBDA = 0.95          // GAE discount
+GAMMA = 0.99               // Reward discount
+
+// Training parameters
+ROLLOUT_STEPS = 2048       // Steps per PPO update
+N_EPOCHS = 10              // Epochs per update
+BATCH_SIZE = 64            // Mini-batch size
+
+// Distribution parameters
+INITIAL_LOG_STD = -0.5     // Initial action std (exp(-0.5) ≈ 0.6)
+ENTROPY_COEFFICIENT = 0.005 // Entropy bonus weight
+```
+
+### STM32 Deployment
+
+**PPO-trained policies deploy to STM32 exactly like TD3-trained policies.** The checkpoint format is identical:
+
+```bash
+# Example: Deploy PPO-trained actor
+docker run -it --rm \
+  -v $(pwd)/checkpoints/multirotor_ppo/2024_01_15_10_00_00_PPO_d+o+a+r+h+c+f+w+e+_000/actor_000000000500.h:/controller/data/actor.h:ro \
+  -v $(pwd)/build_firmware:/output \
+  arpllab/learning_to_fly_build_firmware
+```
+
+The exported checkpoint contains:
+- Serialized actor network weights as C arrays
+- Test observation/action pair for verification
+- Metadata (algorithm name, commit hash)
+
+At runtime on STM32:
+- Only the actor network is used
+- Inference is deterministic: `action = tanh(W3 * tanh(W2 * tanh(W1 * obs + b1) + b2) + b3)`
+- No dynamic memory allocation
+- No Gaussian sampling (mean action only)
+
+### Algorithm Selection Guide
+
+| Use TD3 when... | Use PPO when... |
+|-----------------|-----------------|
+| Sample efficiency matters | Training stability matters |
+| Replay buffer fits in memory | Hyperparameters are well-tuned |
+| Continuous learning needed | Reproducibility is important |
+| Exploration via noise works | Entropy bonus helps exploration |
+
+For quadrotor control, both algorithms can produce high-quality policies. TD3 typically trains faster (in wall-clock time), while PPO may produce more robust policies in some cases.
+
 
 ## Citing
 When using our code/setup in an academic work please cite our publication using the following Bibtex citation:
