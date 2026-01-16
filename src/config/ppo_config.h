@@ -46,14 +46,14 @@ namespace learning_to_fly {
             struct PPOParameters : rlt::rl::algorithms::ppo::DefaultParameters<T, TI> {
                 // Override defaults for quadrotor control
                 
-                // Clipping epsilon - slightly lower for stability
-                static constexpr T CLIP_EPSILON = 0.2;
+                // Clipping epsilon - lower for more conservative updates
+                static constexpr T CLIP_EPSILON = 0.1;
                 
                 // Higher value loss coefficient for accurate value estimation
                 static constexpr T VALUE_LOSS_COEFFICIENT = 0.5;
                 
-                // Lower entropy for more deterministic control
-                static constexpr T ENTROPY_COEFFICIENT = 0.005;
+                // Entropy coefficient for exploration
+                static constexpr T ENTROPY_COEFFICIENT = 0.01;
                 
                 // Discount factor for 100Hz control
                 static constexpr T GAMMA = 0.99;
@@ -62,7 +62,7 @@ namespace learning_to_fly {
                 static constexpr T GAE_LAMBDA = 0.95;
                 
                 // Number of PPO epochs per update
-                static constexpr TI N_EPOCHS = 10;
+                static constexpr TI N_EPOCHS = 15;
                 
                 // Mini-batch size
                 static constexpr TI BATCH_SIZE = 64;
@@ -71,7 +71,7 @@ namespace learning_to_fly {
                 static constexpr TI ROLLOUT_STEPS = 2048;
                 
                 // Number of parallel environments
-                static constexpr TI N_ENVIRONMENTS = 1;
+                static constexpr TI N_ENVIRONMENTS = 8;
                 
                 // Gradient clipping
                 static constexpr T MAX_GRAD_NORM = 0.5;
@@ -89,8 +89,8 @@ namespace learning_to_fly {
                 static constexpr T VALUE_CLIP_RANGE = 0.2;
                 
                 // Learning rates
-                static constexpr T ACTOR_LEARNING_RATE = 3e-4;
-                static constexpr T CRITIC_LEARNING_RATE = 3e-4;
+                static constexpr T ACTOR_LEARNING_RATE = 5e-5;
+                static constexpr T CRITIC_LEARNING_RATE = 1e-4;
             };
 
             /**
@@ -264,7 +264,7 @@ namespace learning_to_fly {
                 static constexpr TI N_ENVIRONMENTS = PPO_PARAMS::N_ENVIRONMENTS;
                 
                 // Training limits
-                static constexpr TI STEP_LIMIT = 1000;  // Number of PPO updates
+                static constexpr TI STEP_LIMIT = 10000;  // Number of PPO updates
                 static constexpr TI ENVIRONMENT_STEP_LIMIT = 500;  // Max steps per episode
                 static constexpr TI BASE_SEED = 0;
                 

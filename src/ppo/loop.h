@@ -419,17 +419,27 @@ namespace rl_tools::rl::algorithms::ppo::loop {
                     T advantage = ts.batch_advantages[i];
                     
                     // Policy loss (clipped surrogate)
+                    // PPO objective: maximize L = min(ratio * A, clip(ratio, 1-eps, 1+eps) * A)
+                    // We minimize -L, so: minimize -min(...) = maximize max(-ratio*A, -clip*A)
+                    // = minimize min(ratio*A, clip*A)
                     T ratio = std::exp(log_prob_new - log_prob_old);
                     T clipped_ratio = std::max((T)(1 - PARAMS::CLIP_EPSILON), 
                                                std::min((T)(1 + PARAMS::CLIP_EPSILON), ratio));
                     
+                    T unclipped_obj = ratio * advantage;
+                    T clipped_obj = clipped_ratio * advantage;
+                    
                     T grad_ratio;
-                    if (ratio * advantage < clipped_ratio * advantage) {
-                        total_policy_loss += -ratio * advantage;
-                        grad_ratio = -advantage;
+                    // PPO uses min() - gradient flows through the smaller term
+                    // We need to check which is actually smaller, accounting for advantage sign
+                    if (unclipped_obj <= clipped_obj) {
+                        // Unclipped objective is smaller (or equal), gradient flows through ratio
+                        total_policy_loss += -unclipped_obj;
+                        grad_ratio = -advantage;  // d(-ratio*A)/d(ratio) = -A
                     } else {
-                        total_policy_loss += -clipped_ratio * advantage;
-                        grad_ratio = 0;  // Clipped, no gradient
+                        // Clipped objective is smaller, no gradient (ratio is clipped)
+                        total_policy_loss += -clipped_obj;
+                        grad_ratio = 0;
                         clip_count += 1;
                     }
                     
