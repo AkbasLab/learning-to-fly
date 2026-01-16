@@ -94,8 +94,9 @@ namespace rl_tools::rl::algorithms::ppo {
      * @param log_prob [out] Log probability of sampled action
      * @param rng Random number generator
      */
-    template<typename T, typename TI, typename RNG>
+    template<typename DEVICE, typename T, typename TI, typename RNG>
     void sample_action(
+        DEVICE& device,
         const T* mean,
         const T* log_std,
         T* action,
@@ -112,7 +113,7 @@ namespace rl_tools::rl::algorithms::ppo {
             
             // Sample from standard normal and transform
             T eps = rlt::random::normal_distribution::sample(
-                typename RNG::SPEC::RANDOM(), 
+                typename DEVICE::SPEC::RANDOM(), 
                 (T)0, (T)1, rng
             );
             action[i] = mean[i] + std * eps;
@@ -274,10 +275,10 @@ namespace rl_tools::rl::algorithms::ppo {
      * Since rl_tools may not have uniform_int_distribution, we use
      * uniform_real_distribution and floor.
      */
-    template<typename TI, typename T, typename RNG>
-    TI random_index(TI max_exclusive, RNG& rng) {
+    template<typename DEVICE, typename TI, typename T, typename RNG>
+    TI random_index(DEVICE& device, TI max_exclusive, RNG& rng) {
         T val = rlt::random::uniform_real_distribution(
-            typename RNG::SPEC::RANDOM(),
+            typename DEVICE::SPEC::RANDOM(),
             (T)0, (T)max_exclusive, rng
         );
         TI result = (TI)val;
@@ -289,19 +290,19 @@ namespace rl_tools::rl::algorithms::ppo {
     /**
      * @brief Generate random indices for mini-batch sampling
      */
-    template<typename TI, typename T, typename RNG>
-    void generate_batch_indices(TI* indices, TI batch_size, TI total_size, RNG& rng) {
+    template<typename DEVICE, typename TI, typename T, typename RNG>
+    void generate_batch_indices(DEVICE& device, TI* indices, TI batch_size, TI total_size, RNG& rng) {
         // Simple random sampling with replacement
         for (TI i = 0; i < batch_size; i++) {
-            indices[i] = random_index<TI, T>(total_size, rng);
+            indices[i] = random_index<DEVICE, TI, T>(device, total_size, rng);
         }
     }
 
     /**
      * @brief Fisher-Yates shuffle for generating permutation
      */
-    template<typename TI, typename T, typename RNG>
-    void shuffle_indices(TI* indices, TI size, RNG& rng) {
+    template<typename DEVICE, typename TI, typename T, typename RNG>
+    void shuffle_indices(DEVICE& device, TI* indices, TI size, RNG& rng) {
         // Initialize with sequential indices
         for (TI i = 0; i < size; i++) {
             indices[i] = i;
@@ -309,7 +310,7 @@ namespace rl_tools::rl::algorithms::ppo {
         
         // Fisher-Yates shuffle
         for (TI i = size - 1; i > 0; i--) {
-            TI j = random_index<TI, T>(i + 1, rng);
+            TI j = random_index<DEVICE, TI, T>(device, i + 1, rng);
             // Swap
             TI tmp = indices[i];
             indices[i] = indices[j];

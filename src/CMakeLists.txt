@@ -10,6 +10,16 @@ target_link_libraries(
         learning_to_fly
         Boost::boost
 )
+
+# PPO Training with UI
+add_executable(ui_ppo ui/ui_ppo.cpp)
+target_link_libraries(
+        ui_ppo
+        PRIVATE
+        rl_tools
+        learning_to_fly
+        Boost::boost
+)
 endif()
 
 add_executable(training_headless training.cpp)

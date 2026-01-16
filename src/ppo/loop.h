@@ -89,6 +89,10 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, CONFIG::BATCH_SIZE, CONFIG::ACTION_DIM>> actor_output_grad;
         rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, CONFIG::BATCH_SIZE, 1>> critic_output_grad;
         
+        // Input gradient matrices for backward pass (required by sequential model API)
+        rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, CONFIG::BATCH_SIZE, CONFIG::OBSERVATION_DIM>> actor_d_input;
+        rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, CONFIG::BATCH_SIZE, CONFIG::OBSERVATION_DIM>> critic_d_input;
+        
         // Temporary storage for batch data (non-matrix form)
         T batch_old_log_probs[CONFIG::BATCH_SIZE];
         T batch_advantages[CONFIG::BATCH_SIZE];
@@ -149,6 +153,8 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         rlt::malloc(ts.device, ts.batch_value_matrix);
         rlt::malloc(ts.device, ts.actor_output_grad);
         rlt::malloc(ts.device, ts.critic_output_grad);
+        rlt::malloc(ts.device, ts.actor_d_input);
+        rlt::malloc(ts.device, ts.critic_d_input);
         
         // Initialize actor-critic
         ppo::init(ts.device, ts.actor_critic, ts.rng);
@@ -215,7 +221,7 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         // Sample action from Gaussian and compute log probability
         T* action = get_action(buffer, idx);
         T log_prob;
-        sample_action(action_mean, ts.actor_critic.log_std, action, log_prob, ACTION_DIM, ts.rng);
+        sample_action(ts.device, action_mean, ts.actor_critic.log_std, action, log_prob, ACTION_DIM, ts.rng);
         buffer.log_probs[idx] = log_prob;
         
         // Get value estimate from critic
@@ -322,7 +328,7 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         
         // Normalize advantages if enabled
         if constexpr (PARAMS::NORMALIZE_ADVANTAGE) {
-            normalize_advantages(buffer);
+            normalize_advantages<typename CONFIG::ROLLOUT_BUFFER_SPEC, T>(buffer, (T)1e-8);
         } else {
             copy_advantages_to_normalized(buffer);
         }
@@ -338,7 +344,7 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         // PPO epochs
         for (TI epoch = 0; epoch < PARAMS::N_EPOCHS; epoch++) {
             // Shuffle indices for this epoch
-            shuffle_indices<TI, T>(ts.batch_indices, TOTAL_SAMPLES, ts.rng);
+            shuffle_indices<typename CONFIG::DEVICE, TI, T>(ts.device, ts.batch_indices, TOTAL_SAMPLES, ts.rng);
             
             // Process mini-batches
             for (TI batch_start = 0; batch_start + BATCH_SIZE <= TOTAL_SAMPLES; batch_start += BATCH_SIZE) {
@@ -365,11 +371,13 @@ namespace rl_tools::rl::algorithms::ppo::loop {
                     ts.batch_old_values[i] = buffer.values[idx];
                 }
                 
-                // Forward pass through actor
-                rlt::forward(ts.device, ts.actor_critic.actor, ts.batch_obs_matrix, ts.batch_actor_output, ts.actor_buffer);
+                // Forward pass through actor (stores intermediate activations for backward)
+                rlt::forward(ts.device, ts.actor_critic.actor, ts.batch_obs_matrix);
+                rlt::copy(ts.device, ts.device, rlt::output(ts.actor_critic.actor), ts.batch_actor_output);
                 
-                // Forward pass through critic
-                rlt::forward(ts.device, ts.actor_critic.critic, ts.batch_obs_matrix, ts.batch_value_matrix, ts.critic_buffer);
+                // Forward pass through critic (stores intermediate activations for backward)
+                rlt::forward(ts.device, ts.actor_critic.critic, ts.batch_obs_matrix);
+                rlt::copy(ts.device, ts.device, rlt::output(ts.actor_critic.critic), ts.batch_value_matrix);
                 
                 // Compute losses for each sample and accumulate gradients
                 T total_policy_loss = 0;
@@ -482,10 +490,10 @@ namespace rl_tools::rl::algorithms::ppo::loop {
                 total_approx_kl /= BATCH_SIZE;
                 
                 // Backward pass for actor
-                rlt::backward_full(ts.device, ts.actor_critic.actor, ts.batch_obs_matrix, ts.actor_output_grad, ts.actor_buffer);
+                rlt::backward_full(ts.device, ts.actor_critic.actor, ts.batch_obs_matrix, ts.actor_output_grad, ts.actor_d_input, ts.actor_buffer);
                 
                 // Backward pass for critic
-                rlt::backward_full(ts.device, ts.actor_critic.critic, ts.batch_obs_matrix, ts.critic_output_grad, ts.critic_buffer);
+                rlt::backward_full(ts.device, ts.actor_critic.critic, ts.batch_obs_matrix, ts.critic_output_grad, ts.critic_d_input, ts.critic_buffer);
                 
                 // Update networks
                 rlt::step(ts.device, ts.actor_critic.actor_optimizer, ts.actor_critic.actor);
@@ -573,11 +581,10 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         rlt::free(ts.device, ts.batch_value_matrix);
         rlt::free(ts.device, ts.actor_output_grad);
         rlt::free(ts.device, ts.critic_output_grad);
+        rlt::free(ts.device, ts.actor_d_input);
+        rlt::free(ts.device, ts.critic_d_input);
         
-        for (TI i = 0; i < CONFIG::N_ENVIRONMENTS; i++) {
-            rlt::free(ts.device, ts.envs[i]);
-        }
-        rlt::free(ts.device, ts.env_eval);
+        // Environments don't need explicit free in this architecture
     }
 
 } // namespace rl_tools::rl::algorithms::ppo::loop
