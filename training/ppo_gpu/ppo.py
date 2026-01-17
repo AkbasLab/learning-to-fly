@@ -386,7 +386,14 @@ class GPUPPO:
         """Save training checkpoint"""
         import os
         
-        path = os.path.join(self.checkpoint_dir, filename)
+        # If filename is already an absolute path, use it directly
+        if os.path.isabs(filename):
+            path = filename
+        else:
+            path = os.path.join(self.checkpoint_dir, filename)
+        
+        # Ensure parent directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         
         # Get underlying model if compiled
         model = self.policy

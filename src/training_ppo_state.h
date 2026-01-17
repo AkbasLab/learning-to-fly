@@ -13,7 +13,6 @@
 #include <queue>
 #include <vector>
 #include <mutex>
-#include <limits>
 
 namespace learning_to_fly {
 
@@ -32,9 +31,6 @@ namespace learning_to_fly {
         // Run identification
         std::string run_name;
         
-        // Training completion flag (for UI)
-        bool finished = false;
-        
         // Trajectory collection for visualization
         std::queue<std::vector<typename CONFIG::ENVIRONMENT::State>> trajectories;
         std::mutex trajectories_mutex;
@@ -43,10 +39,6 @@ namespace learning_to_fly {
         // Validation environments
         typename CONFIG::ENVIRONMENT validation_envs[CONFIG::VALIDATION_N_EPISODES];
         typename CONFIG::ACTOR_TYPE::template DoubleBuffer<CONFIG::VALIDATION_N_EPISODES> validation_actor_buffers;
-        
-        // Best return tracking for checkpoint-on-best
-        T best_validation_return = -std::numeric_limits<T>::infinity();
-        TI best_return_step = 0;
     };
 
 } // namespace learning_to_fly

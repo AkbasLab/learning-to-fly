@@ -24,7 +24,7 @@
 #ifndef LEARNING_TO_FLY_PPO_ROLLOUT_BUFFER_H
 #define LEARNING_TO_FLY_PPO_ROLLOUT_BUFFER_H
 
-#include <rl_tools/containers.h>
+// Static arrays only - no matrix includes needed
 
 namespace rl_tools::rl::algorithms::ppo {
 

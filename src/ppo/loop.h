@@ -30,7 +30,6 @@
 #include "rollout_buffer.h"
 #include "gae.h"
 #include "operations_generic.h"
-#include "observation_normalizer.h"
 
 #include <rl_tools/rl/environments/operations_generic.h>
 #include <rl_tools/nn/operations_generic.h>
@@ -90,10 +89,6 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, CONFIG::BATCH_SIZE, CONFIG::ACTION_DIM>> actor_output_grad;
         rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, CONFIG::BATCH_SIZE, 1>> critic_output_grad;
         
-        // Input gradient matrices for backward pass (required by sequential model API)
-        rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, CONFIG::BATCH_SIZE, CONFIG::OBSERVATION_DIM>> actor_d_input;
-        rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, CONFIG::BATCH_SIZE, CONFIG::OBSERVATION_DIM>> critic_d_input;
-        
         // Temporary storage for batch data (non-matrix form)
         T batch_old_log_probs[CONFIG::BATCH_SIZE];
         T batch_advantages[CONFIG::BATCH_SIZE];
@@ -120,9 +115,6 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         T avg_entropy;
         T avg_clip_fraction;
         T avg_approx_kl;
-        
-        // Observation normalizer for training stability
-        ObservationNormalizer<T, TI, CONFIG::OBSERVATION_DIM> obs_normalizer;
     };
 
     /**
@@ -157,8 +149,6 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         rlt::malloc(ts.device, ts.batch_value_matrix);
         rlt::malloc(ts.device, ts.actor_output_grad);
         rlt::malloc(ts.device, ts.critic_output_grad);
-        rlt::malloc(ts.device, ts.actor_d_input);
-        rlt::malloc(ts.device, ts.critic_d_input);
         
         // Initialize actor-critic
         ppo::init(ts.device, ts.actor_critic, ts.rng);
@@ -186,9 +176,6 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         ts.avg_entropy = 0;
         ts.avg_clip_fraction = 0;
         ts.avg_approx_kl = 0;
-        
-        // Initialize observation normalizer
-        ts.obs_normalizer.init();
     }
 
     /**
@@ -210,17 +197,7 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         // Get observation from current state into matrix
         rlt::observe(ts.device, ts.envs[env_idx], ts.states[env_idx], ts.single_obs_matrix, ts.rng);
         
-        // Update observation normalizer with raw observation
-        T raw_obs[OBSERVATION_DIM];
-        for (TI i = 0; i < OBSERVATION_DIM; i++) {
-            raw_obs[i] = rlt::get(ts.single_obs_matrix, 0, i);
-        }
-        ts.obs_normalizer.update(raw_obs);
-        
-        // Normalize observation in-place
-        ts.obs_normalizer.normalize_matrix(ts.device, ts.single_obs_matrix);
-        
-        // Copy NORMALIZED observation to buffer (for PPO update consistency)
+        // Copy observation to buffer
         T* obs = get_observation(buffer, idx);
         for (TI i = 0; i < OBSERVATION_DIM; i++) {
             obs[i] = rlt::get(ts.single_obs_matrix, 0, i);
@@ -238,7 +215,7 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         // Sample action from Gaussian and compute log probability
         T* action = get_action(buffer, idx);
         T log_prob;
-        sample_action(ts.device, action_mean, ts.actor_critic.log_std, action, log_prob, ACTION_DIM, ts.rng);
+        sample_action(action_mean, ts.actor_critic.log_std, action, log_prob, ACTION_DIM, ts.rng);
         buffer.log_probs[idx] = log_prob;
         
         // Get value estimate from critic
@@ -259,9 +236,8 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         buffer.rewards[idx] = reward;
         buffer.dones[idx] = terminated ? (T)1 : (T)0;
         
-        // Store next observation (normalized)
+        // Store next observation
         rlt::observe(ts.device, ts.envs[env_idx], ts.next_states[env_idx], ts.single_obs_matrix, ts.rng);
-        ts.obs_normalizer.normalize_matrix(ts.device, ts.single_obs_matrix);
         T* next_obs = get_next_observation(buffer, idx);
         for (TI i = 0; i < OBSERVATION_DIM; i++) {
             next_obs[i] = rlt::get(ts.single_obs_matrix, 0, i);
@@ -309,10 +285,9 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         
         ts.rollout_buffer.full = true;
         
-        // Compute last values for GAE bootstrap (using normalized observations)
+        // Compute last values for GAE bootstrap
         for (TI env_idx = 0; env_idx < CONFIG::N_ENVIRONMENTS; env_idx++) {
             rlt::observe(ts.device, ts.envs[env_idx], ts.states[env_idx], ts.single_obs_matrix, ts.rng);
-            ts.obs_normalizer.normalize_matrix(ts.device, ts.single_obs_matrix);
             rlt::evaluate(ts.device, ts.actor_critic.critic, ts.single_obs_matrix, ts.single_value_matrix, ts.single_critic_buffer);
             ts.last_values[env_idx] = rlt::get(ts.single_value_matrix, 0, 0);
             ts.last_dones[env_idx] = 0;  // Not done yet
@@ -347,7 +322,7 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         
         // Normalize advantages if enabled
         if constexpr (PARAMS::NORMALIZE_ADVANTAGE) {
-            normalize_advantages<typename CONFIG::ROLLOUT_BUFFER_SPEC, T>(buffer, (T)1e-8);
+            normalize_advantages(buffer);
         } else {
             copy_advantages_to_normalized(buffer);
         }
@@ -363,7 +338,7 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         // PPO epochs
         for (TI epoch = 0; epoch < PARAMS::N_EPOCHS; epoch++) {
             // Shuffle indices for this epoch
-            shuffle_indices<typename CONFIG::DEVICE, TI, T>(ts.device, ts.batch_indices, TOTAL_SAMPLES, ts.rng);
+            shuffle_indices<TI, T>(ts.batch_indices, TOTAL_SAMPLES, ts.rng);
             
             // Process mini-batches
             for (TI batch_start = 0; batch_start + BATCH_SIZE <= TOTAL_SAMPLES; batch_start += BATCH_SIZE) {
@@ -390,13 +365,11 @@ namespace rl_tools::rl::algorithms::ppo::loop {
                     ts.batch_old_values[i] = buffer.values[idx];
                 }
                 
-                // Forward pass through actor (stores intermediate activations for backward)
-                rlt::forward(ts.device, ts.actor_critic.actor, ts.batch_obs_matrix);
-                rlt::copy(ts.device, ts.device, rlt::output(ts.actor_critic.actor), ts.batch_actor_output);
+                // Forward pass through actor
+                rlt::forward(ts.device, ts.actor_critic.actor, ts.batch_obs_matrix, ts.batch_actor_output, ts.actor_buffer);
                 
-                // Forward pass through critic (stores intermediate activations for backward)
-                rlt::forward(ts.device, ts.actor_critic.critic, ts.batch_obs_matrix);
-                rlt::copy(ts.device, ts.device, rlt::output(ts.actor_critic.critic), ts.batch_value_matrix);
+                // Forward pass through critic
+                rlt::forward(ts.device, ts.actor_critic.critic, ts.batch_obs_matrix, ts.batch_value_matrix, ts.critic_buffer);
                 
                 // Compute losses for each sample and accumulate gradients
                 T total_policy_loss = 0;
@@ -438,27 +411,17 @@ namespace rl_tools::rl::algorithms::ppo::loop {
                     T advantage = ts.batch_advantages[i];
                     
                     // Policy loss (clipped surrogate)
-                    // PPO objective: maximize L = min(ratio * A, clip(ratio, 1-eps, 1+eps) * A)
-                    // We minimize -L, so: minimize -min(...) = maximize max(-ratio*A, -clip*A)
-                    // = minimize min(ratio*A, clip*A)
                     T ratio = std::exp(log_prob_new - log_prob_old);
                     T clipped_ratio = std::max((T)(1 - PARAMS::CLIP_EPSILON), 
                                                std::min((T)(1 + PARAMS::CLIP_EPSILON), ratio));
                     
-                    T unclipped_obj = ratio * advantage;
-                    T clipped_obj = clipped_ratio * advantage;
-                    
                     T grad_ratio;
-                    // PPO uses min() - gradient flows through the smaller term
-                    // We need to check which is actually smaller, accounting for advantage sign
-                    if (unclipped_obj <= clipped_obj) {
-                        // Unclipped objective is smaller (or equal), gradient flows through ratio
-                        total_policy_loss += -unclipped_obj;
-                        grad_ratio = -advantage;  // d(-ratio*A)/d(ratio) = -A
+                    if (ratio * advantage < clipped_ratio * advantage) {
+                        total_policy_loss += -ratio * advantage;
+                        grad_ratio = -advantage;
                     } else {
-                        // Clipped objective is smaller, no gradient (ratio is clipped)
-                        total_policy_loss += -clipped_obj;
-                        grad_ratio = 0;
+                        total_policy_loss += -clipped_ratio * advantage;
+                        grad_ratio = 0;  // Clipped, no gradient
                         clip_count += 1;
                     }
                     
@@ -519,10 +482,10 @@ namespace rl_tools::rl::algorithms::ppo::loop {
                 total_approx_kl /= BATCH_SIZE;
                 
                 // Backward pass for actor
-                rlt::backward_full(ts.device, ts.actor_critic.actor, ts.batch_obs_matrix, ts.actor_output_grad, ts.actor_d_input, ts.actor_buffer);
+                rlt::backward_full(ts.device, ts.actor_critic.actor, ts.batch_obs_matrix, ts.actor_output_grad, ts.actor_buffer);
                 
                 // Backward pass for critic
-                rlt::backward_full(ts.device, ts.actor_critic.critic, ts.batch_obs_matrix, ts.critic_output_grad, ts.critic_d_input, ts.critic_buffer);
+                rlt::backward_full(ts.device, ts.actor_critic.critic, ts.batch_obs_matrix, ts.critic_output_grad, ts.critic_buffer);
                 
                 // Update networks
                 rlt::step(ts.device, ts.actor_critic.actor_optimizer, ts.actor_critic.actor);
@@ -610,10 +573,11 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         rlt::free(ts.device, ts.batch_value_matrix);
         rlt::free(ts.device, ts.actor_output_grad);
         rlt::free(ts.device, ts.critic_output_grad);
-        rlt::free(ts.device, ts.actor_d_input);
-        rlt::free(ts.device, ts.critic_d_input);
         
-        // Environments don't need explicit free in this architecture
+        for (TI i = 0; i < CONFIG::N_ENVIRONMENTS; i++) {
+            rlt::free(ts.device, ts.envs[i]);
+        }
+        rlt::free(ts.device, ts.env_eval);
     }
 
 } // namespace rl_tools::rl::algorithms::ppo::loop

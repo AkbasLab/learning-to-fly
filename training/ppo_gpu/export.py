@@ -37,14 +37,25 @@ def export_to_c_header(
     # Extract weights from actor network
     weights = model.export_weights()
     
-    # Move to CPU and convert to numpy
-    fc1_w = weights['actor.fc1.weight'].cpu().numpy()
-    fc1_b = weights['actor.fc1.bias'].cpu().numpy()
-    fc2_w = weights['actor.fc2.weight'].cpu().numpy()
-    fc2_b = weights['actor.fc2.bias'].cpu().numpy()
-    fc3_w = weights['actor.fc3.weight'].cpu().numpy()
-    fc3_b = weights['actor.fc3.bias'].cpu().numpy()
-    log_std = weights['actor.log_std'].cpu().numpy()
+    # Get weights - handle both key naming conventions
+    if 'actor_l1_w' in weights:
+        # New naming convention (already numpy)
+        fc1_w = weights['actor_l1_w']
+        fc1_b = weights['actor_l1_b']
+        fc2_w = weights['actor_l2_w']
+        fc2_b = weights['actor_l2_b']
+        fc3_w = weights['actor_l3_w']
+        fc3_b = weights['actor_l3_b']
+        log_std = weights['log_std']
+    else:
+        # Legacy naming convention (torch tensors)
+        fc1_w = weights['actor.fc1.weight'].cpu().numpy()
+        fc1_b = weights['actor.fc1.bias'].cpu().numpy()
+        fc2_w = weights['actor.fc2.weight'].cpu().numpy()
+        fc2_b = weights['actor.fc2.bias'].cpu().numpy()
+        fc3_w = weights['actor.fc3.weight'].cpu().numpy()
+        fc3_b = weights['actor.fc3.bias'].cpu().numpy()
+        log_std = weights['actor.log_std'].cpu().numpy()
     
     obs_mean_np = obs_mean.cpu().numpy()
     obs_std_np = obs_std.cpu().numpy()
@@ -269,11 +280,8 @@ def export_onnx(
         def forward(self, x):
             # Normalize
             x = (x - self.obs_mean) / self.obs_std
-            # Forward through actor
-            h = torch.tanh(self.actor.fc1(x))
-            h = torch.tanh(self.actor.fc2(h))
-            action = torch.tanh(self.actor.fc3(h))
-            return action
+            # Forward through actor (Sequential with layers at [0], [2], [4])
+            return self.actor(x)
     
     wrapper = PolicyWithNorm(model.actor, obs_mean, obs_std)
     wrapper.eval()

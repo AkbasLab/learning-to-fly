@@ -46,9 +46,9 @@ void run_ppo() {
         
         auto start = std::chrono::high_resolution_clock::now();
         
-        // Initialize training state (on heap due to large size with many envs)
-        auto* ts = new learning_to_fly::PPOTrainingState<CONFIG>();
-        learning_to_fly::ppo_training::init(*ts, run_i);
+        // Initialize training state
+        learning_to_fly::PPOTrainingState<CONFIG> ts;
+        learning_to_fly::ppo_training::init(ts, run_i);
         
         std::cout << "Training for " << CONFIG::STEP_LIMIT << " PPO updates...\n";
         std::cout << "Total environment steps per update: " 
@@ -56,8 +56,11 @@ void run_ppo() {
         
         // Training loop
         for (TI step_i = 0; step_i < CONFIG::STEP_LIMIT; step_i++) {
-            learning_to_fly::ppo_training::step(*ts);
+            learning_to_fly::ppo_training::step(ts);
         }
+        
+        // Cleanup
+        learning_to_fly::ppo_training::destroy(ts);
         
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
@@ -65,13 +68,9 @@ void run_ppo() {
         std::cout << "\n========================================\n";
         std::cout << "PPO Training completed!\n";
         std::cout << "Total time: " << duration.count() << "s\n";
-        std::cout << "Total environment steps: " << ts->total_steps << "\n";
-        std::cout << "Steps per second: " << ts->total_steps / duration.count() << "\n";
+        std::cout << "Total environment steps: " << ts.total_steps << "\n";
+        std::cout << "Steps per second: " << ts.total_steps / duration.count() << "\n";
         std::cout << "========================================\n\n";
-        
-        // Cleanup
-        learning_to_fly::ppo_training::destroy(*ts);
-        delete ts;
     }
 }
 

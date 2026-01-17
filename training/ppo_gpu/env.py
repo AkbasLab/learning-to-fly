@@ -11,18 +11,25 @@ from typing import Tuple
 
 @dataclass
 class QuadrotorConfig:
-    """Quadrotor physical parameters (Crazyflie 2.1)"""
+    """Quadrotor physical parameters (Crazyflie 2.1) - matching rl_tools"""
     mass: float = 0.027  # kg
-    arm_length: float = 0.046  # m
-    max_thrust_per_motor: float = 0.06  # N (0.015 kg * 4 motors)
+    arm_length: float = 0.028  # m (from rl_tools)
     
-    # Inertia tensor
-    Jxx: float = 1.4e-5
-    Jyy: float = 1.4e-5
-    Jzz: float = 2.17e-5
+    # Thrust model: thrust = thrust_coeff * rpm^2
+    # Action in [-1, 1] maps to RPM in [0, max_rpm]
+    max_rpm: float = 21702.0
+    thrust_coeff: float = 3.16e-10  # N per rpm^2
+    
+    # Inertia tensor (from rl_tools crazy_flie.h)
+    Jxx: float = 3.85e-6
+    Jyy: float = 3.85e-6
+    Jzz: float = 5.9675e-6
+    
+    # Torque constant
+    torque_constant: float = 0.005964552
     
     # Motor dynamics
-    motor_time_constant: float = 0.02  # seconds
+    motor_time_constant: float = 0.15  # seconds (from rl_tools)
     
     # Physics
     gravity: float = 9.81
@@ -33,12 +40,27 @@ class QuadrotorConfig:
     max_steps: int = 500
     position_bound: float = 5.0
     
-    # Reward weights
-    position_weight: float = 1.0
+    # Takeoff and hover target
+    target_height: float = 1.0  # meters above ground
+    init_height_range: float = 0.02  # small random variation at start
+    init_height_min: float = 0.05  # minimum starting height (avoid ground contact)
+    xy_spawn_range: float = 0.1  # spawn near origin in x/y
+    
+    # Reward weights - SCALED FOR TAKEOFF LEARNING
+    # Key insight: reward must be positive when doing the right thing
+    # Position cost is SMALL so altitude bonus dominates early learning
+    position_weight: float = 0.1  # Reduced - don't overwhelm altitude bonus
     velocity_weight: float = 0.01
     angular_velocity_weight: float = 0.001
-    action_weight: float = 0.0001
+    action_weight: float = 0.0
     termination_penalty: float = 10.0
+    
+    # Takeoff reward shaping - LARGE bonuses to encourage altitude gain
+    altitude_bonus_scale: float = 2.0  # Primary reward: gain altitude!
+    hover_bonus: float = 5.0  # Large bonus for reaching target
+    hover_radius: float = 0.3  # Within 30cm counts as hovering
+    upright_bonus: float = 0.5  # Bonus for staying upright
+    velocity_penalty_at_hover: float = 0.5  # Penalize velocity when near target
 
 
 class GPUQuadrotorEnv:
@@ -133,27 +155,32 @@ class GPUQuadrotorEnv:
             env_ids = torch.arange(self.num_envs, device=self.device)
         
         n = len(env_ids)
+        cfg = self.config
         
-        # Random initial position within [-1, 1]^3
-        self.pos[env_ids] = (torch.rand(n, 3, device=self.device) * 2 - 1)
+        # Start on the ground with small random variation
+        # x, y near origin, z near ground level but above contact
+        xy_pos = (torch.rand(n, 2, device=self.device) * 2 - 1) * cfg.xy_spawn_range
+        z_pos = cfg.init_height_min + torch.rand(n, 1, device=self.device) * cfg.init_height_range
+        self.pos[env_ids] = torch.cat([xy_pos, z_pos], dim=-1)
         
         # Identity quaternion (upright)
         self.quat[env_ids] = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device).expand(n, 4)
         
-        # Zero velocity
+        # Zero velocity (starting from rest on ground)
         self.vel[env_ids] = 0.0
         self.omega[env_ids] = 0.0
         
-        # Hover motor state
-        hover_thrust = self.mass * self.config.gravity / (4 * self.config.max_thrust_per_motor)
-        self.motors[env_ids] = hover_thrust
+        # Motors off initially (on the ground)
+        self.motors[env_ids] = 0.0
         
         # Zero step count
         self.step_count[env_ids] = 0
         self.episode_return[env_ids] = 0
         
-        # Target at origin
-        self.target[env_ids] = 0
+        # Target: hover at specified height above ground, centered at origin
+        self.target[env_ids, 0] = 0.0  # x = 0
+        self.target[env_ids, 1] = 0.0  # y = 0
+        self.target[env_ids, 2] = cfg.target_height  # z = target height
         
         return self._get_obs(env_ids)
     
@@ -270,27 +297,49 @@ class GPUQuadrotorEnv:
         return obs, rewards, dones, info
     
     def _physics_step(self, motor_cmd: torch.Tensor):
-        """Single physics substep"""
-        # Low-pass filter motor response
+        """Single physics substep - matching rl_tools physics"""
+        # Low-pass filter motor response (motor_cmd is normalized 0-1)
         self.motors = self.motors + self.motor_alpha * (motor_cmd - self.motors)
         
-        # Compute thrust per motor [N]
-        thrusts = self.motors * self.config.max_thrust_per_motor
-        total_thrust = thrusts.sum(dim=-1, keepdim=True)
+        # Convert to RPM and compute thrust
+        # motors is in [0, 1], map to [0, max_rpm]
+        rpm = self.motors * self.config.max_rpm
         
-        # Thrust in body frame (always +Z)
-        thrust_body = torch.zeros_like(self.pos)
-        thrust_body[:, 2] = total_thrust.squeeze() / self.mass
+        # Thrust per motor: thrust = thrust_coeff * rpm^2
+        thrusts = self.config.thrust_coeff * (rpm ** 2)  # [n, 4] in Newtons
+        total_thrust = thrusts.sum(dim=-1)  # [n] total thrust
+        
+        # Thrust acceleration in body frame (always +Z body axis)
+        thrust_acc_body = torch.zeros_like(self.pos)
+        thrust_acc_body[:, 2] = total_thrust / self.mass
         
         # Rotate to world frame
-        thrust_world = self._rotate_vector(self.quat, thrust_body)
+        thrust_acc_world = self._rotate_vector(self.quat, thrust_acc_body)
         
         # Linear acceleration (thrust + gravity)
-        acc = thrust_world + self.gravity
+        acc = thrust_acc_world + self.gravity
         
-        # Angular acceleration from torques
-        torques = torch.matmul(thrusts, self.thrust_to_torque.T)  # [n, 3]
-        alpha = torques * self.J_inv  # Simplified (diagonal inertia)
+        # Torque computation
+        # Roll/pitch from differential thrust at arm positions
+        # Yaw from motor torque (alternating direction)
+        L = self.config.arm_length
+        tc = self.config.torque_constant
+        
+        # Motor layout (X config from rl_tools):
+        # 0: (+L, -L) front-right, CCW (-1 torque)
+        # 1: (-L, -L) back-right, CW (+1 torque) 
+        # 2: (-L, +L) back-left, CCW (-1 torque)
+        # 3: (+L, +L) front-left, CW (+1 torque)
+        
+        # Roll torque (about x-axis, from y-offset thrust)
+        roll_torque = L * (thrusts[:, 0] - thrusts[:, 1] - thrusts[:, 2] + thrusts[:, 3])
+        # Pitch torque (about y-axis, from x-offset thrust)
+        pitch_torque = L * (thrusts[:, 0] + thrusts[:, 1] - thrusts[:, 2] - thrusts[:, 3])
+        # Yaw torque (from motor drag, alternating)
+        yaw_torque = tc * (-thrusts[:, 0] + thrusts[:, 1] - thrusts[:, 2] + thrusts[:, 3])
+        
+        torques = torch.stack([roll_torque, pitch_torque, yaw_torque], dim=-1)
+        alpha = torques * self.J_inv  # Angular acceleration
         
         # Integrate velocity and position
         self.vel = self.vel + acc * self.dt_sub
@@ -311,40 +360,91 @@ class GPUQuadrotorEnv:
         self.quat = F.normalize(self.quat, dim=-1)
     
     def _compute_reward(self, actions: torch.Tensor) -> torch.Tensor:
-        """Compute reward for all environments"""
+        """
+        Compute reward optimized for takeoff learning.
+        
+        Key insight: Early in training, the drone needs to learn:
+        1. Thrust all motors = go up (most important!)
+        2. Stay upright
+        3. Reach target height
+        4. Stabilize at target
+        
+        Reward is designed so that even random exploration that produces
+        altitude gain gets positive reward, creating a clear gradient.
+        """
         cfg = self.config
         
-        # Position error
+        # Current altitude (height above ground)
+        altitude = self.pos[:, 2].clamp(min=0)
+        
+        # Distance to target (3D)
         pos_error = self.pos - self.target
-        pos_cost = (pos_error ** 2).sum(dim=-1)
+        pos_dist = torch.norm(pos_error, dim=-1)
         
-        # Velocity cost
-        vel_cost = (self.vel ** 2).sum(dim=-1)
+        # === PRIMARY REWARD: ALTITUDE PROGRESS ===
+        # This is the most important signal for takeoff
+        # Reward scales from 0 (ground) to altitude_bonus_scale (at target height)
+        altitude_normalized = (altitude / cfg.target_height).clamp(max=1.5)
+        altitude_reward = cfg.altitude_bonus_scale * altitude_normalized
         
-        # Angular velocity cost
-        omega_cost = (self.omega ** 2).sum(dim=-1)
+        # === HOVER REWARD: Reached target zone ===
+        # Large bonus for being within hover_radius of target
+        in_hover_zone = pos_dist < cfg.hover_radius
+        hover_reward = torch.where(
+            in_hover_zone,
+            cfg.hover_bonus * (1.0 - pos_dist / cfg.hover_radius),
+            torch.zeros_like(pos_dist)
+        )
         
-        # Action cost (encourage smooth control)
-        action_cost = (actions ** 2).sum(dim=-1)
+        # === STABILITY REWARDS ===
+        # Upright bonus (quat w component = 1 means upright)
+        upright = self.quat[:, 0].abs()
+        upright_reward = cfg.upright_bonus * upright
         
-        reward = -(
-            cfg.position_weight * pos_cost +
-            cfg.velocity_weight * vel_cost +
-            cfg.angular_velocity_weight * omega_cost +
-            cfg.action_weight * action_cost
+        # Velocity penalty when hovering (encourage stillness at target)
+        vel_magnitude = torch.norm(self.vel, dim=-1)
+        hover_vel_penalty = torch.where(
+            in_hover_zone,
+            cfg.velocity_penalty_at_hover * vel_magnitude,
+            torch.zeros_like(vel_magnitude)
+        )
+        
+        # === SMALL COSTS (don't overwhelm altitude learning) ===
+        # XY position error (small penalty for drifting laterally)
+        xy_error = (pos_error[:, :2] ** 2).sum(dim=-1)
+        xy_cost = cfg.position_weight * xy_error * 0.1  # Very small
+        
+        # Angular velocity cost (small)
+        omega_cost = cfg.angular_velocity_weight * (self.omega ** 2).sum(dim=-1)
+        
+        # === COMBINE ===
+        reward = (
+            altitude_reward +      # Go up! (main signal)
+            hover_reward +         # Stay at target
+            upright_reward -       # Stay level
+            hover_vel_penalty -    # Be still when hovering
+            xy_cost -              # Don't drift
+            omega_cost             # Don't spin
         )
         
         return reward
     
     def _check_done(self) -> torch.Tensor:
         """Check termination conditions"""
-        # Out of bounds
-        out_of_bounds = (self.pos.abs() > self.config.position_bound).any(dim=-1)
+        # Out of bounds (x, y)
+        xy_out_of_bounds = (self.pos[:, :2].abs() > self.config.position_bound).any(dim=-1)
+        
+        # Too high
+        too_high = self.pos[:, 2] > self.config.position_bound
+        
+        # Ground collision (actual crash, not just settling)
+        # Drone starts at ~0.05m, so z < 0 means it crashed
+        ground_collision = self.pos[:, 2] < 0.0
         
         # Timeout
         timeout = self.step_count >= self.config.max_steps
         
-        return out_of_bounds | timeout
+        return xy_out_of_bounds | too_high | ground_collision | timeout
     
     def get_obs_normalization_params(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get observation normalization parameters for export"""
