@@ -48,7 +48,7 @@ def mode_hover_original(cf, args):
 def mode_hover_learned(cf, args):
     set_param(cf, "rlt.trigger", 0) # setting the trigger mode to the custom command (cf. https://github.com/arplaboratory/learning_to_fly_controller/blob/0a7680de591d85813f1cd27834b240aeac962fdd/rl_tools_controller.c#L80)
     set_param(cf, "rlt.wn", 1)
-    set_param(cf, "rlt.motor_warmup", 1)
+    set_param(cf, "rlt.motor_warmup", 1, optional=True)
     set_param(cf, "rlt.target_z", args.height)
     input("Press enter to start hovering")
     prev = time.time()
@@ -68,12 +68,18 @@ def mode_hover_learned(cf, args):
         prev = current
         send_learned_policy_packet(cf)
 
-def set_param(cf, name, target):
-    print(f"Parameter {name} was {cf.param.get_value(name)}, setting to {target}")
-    while abs(float(cf.param.get_value(name)) - float(target)) > 1e-5:
-        cf.param.set_value(name, target)
-        time.sleep(0.1)
-    print(f"Parameter {name} is {cf.param.get_value(name)} now")
+def set_param(cf, name, target, optional=False):
+    try:
+        print(f"Parameter {name} was {cf.param.get_value(name)}, setting to {target}")
+        while abs(float(cf.param.get_value(name)) - float(target)) > 1e-5:
+            cf.param.set_value(name, target)
+            time.sleep(0.1)
+        print(f"Parameter {name} is {cf.param.get_value(name)} now")
+    except KeyError:
+        if optional:
+            print(f"Parameter {name} not found (optional, skipping)")
+        else:
+            raise
 
 
 def mode_trajectory_tracking(cf, args):
