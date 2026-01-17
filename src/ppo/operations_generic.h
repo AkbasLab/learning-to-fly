@@ -84,14 +84,18 @@ namespace rl_tools::rl::algorithms::ppo {
     // ================================================================
 
     /**
-     * @brief Sample action from Gaussian policy and compute log probability
+     * @brief Sample action from Gaussian policy with TANH SQUASHING
      * 
-     * Policy is: π(a|s) = N(μ(s), σ²) where μ(s) = actor(s)
+     * Policy is: π(a|s) = N(μ(s), σ²) squashed through tanh
      * 
-     * @param mean Action mean from actor network
+     * CRITICAL FIX: Use tanh squashing instead of hard clipping!
+     * Hard clipping creates a truncated Gaussian with biased gradients.
+     * Tanh squashing is differentiable and has a proper log-prob correction.
+     * 
+     * @param mean Action mean from actor network (pre-tanh)
      * @param log_std Log standard deviation (learnable parameter)
-     * @param action [out] Sampled action
-     * @param log_prob [out] Log probability of sampled action
+     * @param action [out] Sampled action (post-tanh, in [-1, 1])
+     * @param log_prob [out] Log probability with tanh correction
      * @param rng Random number generator
      */
     template<typename DEVICE, typename T, typename TI, typename RNG>
@@ -105,6 +109,7 @@ namespace rl_tools::rl::algorithms::ppo {
         RNG& rng
     ) {
         constexpr T LOG_2PI = 1.8378770664093453;  // log(2π)
+        constexpr T EPSILON = 1e-6;  // Numerical stability
         
         log_prob = 0;
         
@@ -116,14 +121,46 @@ namespace rl_tools::rl::algorithms::ppo {
                 typename DEVICE::SPEC::RANDOM(), 
                 (T)0, (T)1, rng
             );
-            action[i] = mean[i] + std * eps;
             
-            // Clamp action to valid range [-1, 1]
-            action[i] = std::max((T)-1, std::min((T)1, action[i]));
+            // Pre-squash action (unbounded Gaussian sample)
+            T u = mean[i] + std * eps;
             
-            // Log probability: log N(a; μ, σ²) = -0.5 * [(a-μ)²/σ² + log(σ²) + log(2π)]
-            T normalized = (action[i] - mean[i]) / std;
-            log_prob += -0.5 * (normalized * normalized + 2 * log_std[i] + LOG_2PI);
+            // Apply tanh squashing to bound action to [-1, 1]
+            action[i] = std::tanh(u);
+            
+            // Log probability with tanh correction:
+            // log π(a|s) = log N(u; μ, σ²) - log(1 - tanh²(u))
+            //            = log N(u; μ, σ²) - log(1 - a²)
+            // 
+            // This is the CORRECT log-prob for a squashed Gaussian!
+            T normalized = (u - mean[i]) / std;
+            T log_prob_gaussian = -0.5 * (normalized * normalized + 2 * log_std[i] + LOG_2PI);
+            
+            // Tanh squashing correction: -log(1 - tanh²(u)) = -log(1 - a²)
+            // Add epsilon for numerical stability when a is near ±1
+            T tanh_correction = std::log(std::max(EPSILON, (T)1 - action[i] * action[i]));
+            
+            log_prob += log_prob_gaussian - tanh_correction;
+        }
+    }
+    
+    /**
+     * @brief Get deterministic action (mean only) for DEPLOYMENT
+     * 
+     * At inference time on STM32, we use the mean action without sampling.
+     * The actor network already outputs tanh-bounded values in [-1, 1].
+     * 
+     * CRITICAL: The actor output layer uses FAST_TANH activation, so the
+     * output is already bounded. Do NOT apply tanh again!
+     */
+    template<typename T, typename TI>
+    void get_deterministic_action(
+        const T* actor_output,  // Already tanh-bounded from network
+        T* action,
+        TI action_dim
+    ) {
+        for (TI i = 0; i < action_dim; i++) {
+            action[i] = actor_output[i];  // Direct copy, already in [-1, 1]
         }
     }
 
@@ -131,21 +168,38 @@ namespace rl_tools::rl::algorithms::ppo {
      * @brief Compute log probability of action under current policy
      * 
      * Used during PPO update to compute π_new(a|s).
+     * 
+     * CRITICAL: Must use same tanh correction as sample_action!
+     * The action stored in buffer is post-tanh (in [-1, 1]).
+     * We need to recover the pre-tanh value to compute the Gaussian log-prob.
      */
     template<typename T, typename TI>
     T compute_log_prob(
         const T* mean,
         const T* log_std,
-        const T* action,
+        const T* action,  // Post-tanh action in [-1, 1]
         TI action_dim
     ) {
         constexpr T LOG_2PI = 1.8378770664093453;
+        constexpr T EPSILON = 1e-6;
         
         T log_prob = 0;
         for (TI i = 0; i < action_dim; i++) {
             T std = std::exp(log_std[i]);
-            T normalized = (action[i] - mean[i]) / std;
-            log_prob += -0.5 * (normalized * normalized + 2 * log_std[i] + LOG_2PI);
+            
+            // Recover pre-tanh value: u = atanh(a)
+            // Clamp action to avoid atanh(±1) = ±inf
+            T a_clamped = std::max((T)(-1 + EPSILON), std::min((T)(1 - EPSILON), action[i]));
+            T u = std::atanh(a_clamped);
+            
+            // Gaussian log-prob for pre-tanh value
+            T normalized = (u - mean[i]) / std;
+            T log_prob_gaussian = -0.5 * (normalized * normalized + 2 * log_std[i] + LOG_2PI);
+            
+            // Tanh correction: -log(1 - a²)
+            T tanh_correction = std::log(std::max(EPSILON, (T)1 - a_clamped * a_clamped));
+            
+            log_prob += log_prob_gaussian - tanh_correction;
         }
         return log_prob;
     }

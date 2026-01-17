@@ -14,3 +14,15 @@ target_link_libraries(cuda_benchmark
         learning_to_fly
 )
 RL_TOOLS_TAG_IS_CUDA(cuda_benchmark)
+
+# ============================================================
+# CUDA-accelerated PPO Training
+# ============================================================
+add_executable(training_ppo_cuda training_ppo_cuda.cu)
+target_link_libraries(training_ppo_cuda
+        rl_tools
+        rl_tools::optimizations_cuda
+        learning_to_fly
+)
+RL_TOOLS_TAG_IS_CUDA(training_ppo_cuda)
+target_compile_definitions(training_ppo_cuda PRIVATE RL_TOOLS_BACKEND_ENABLE_CUDA)

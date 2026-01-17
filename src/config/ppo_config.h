@@ -41,6 +41,10 @@ namespace learning_to_fly {
              * - High-frequency control (100Hz)
              * - Stable hover and trajectory tracking
              * - Sample-efficient learning
+             * 
+             * CUDA OPTIMIZATION:
+             * When CUDA is enabled, we use larger batch sizes and more
+             * parallel environments to maximize GPU utilization.
              */
             template<typename T, typename TI>
             struct PPOParameters : rlt::rl::algorithms::ppo::DefaultParameters<T, TI> {
@@ -62,24 +66,33 @@ namespace learning_to_fly {
                 static constexpr T GAE_LAMBDA = 0.95;
                 
                 // Number of PPO epochs per update
-                static constexpr TI N_EPOCHS = 15;
+                static constexpr TI N_EPOCHS = 10;
                 
-                // Mini-batch size
+                // Mini-batch size (increased for GPU efficiency)
+#ifdef RL_TOOLS_BACKEND_ENABLE_CUDA
+                static constexpr TI BATCH_SIZE = 2048;
+#else
                 static constexpr TI BATCH_SIZE = 64;
+#endif
                 
                 // Rollout length (steps per PPO update)
-                static constexpr TI ROLLOUT_STEPS = 2048;
+                static constexpr TI ROLLOUT_STEPS = 1024;
                 
-                // Number of parallel environments
+                // Number of parallel environments (maximized for GPU)
+#ifdef RL_TOOLS_BACKEND_ENABLE_CUDA
+                static constexpr TI N_ENVIRONMENTS = 256;  // 256 parallel envs on GPU
+#else
                 static constexpr TI N_ENVIRONMENTS = 8;
+#endif
                 
                 // Gradient clipping
                 static constexpr T MAX_GRAD_NORM = 0.5;
                 
                 // Action distribution parameters
-                static constexpr T INITIAL_LOG_STD = -0.5;
-                static constexpr T MIN_LOG_STD = -2.0;
-                static constexpr T MAX_LOG_STD = 0.5;
+                // LOWER initial log_std for tighter initial policy (safer for real deployment)
+                static constexpr T INITIAL_LOG_STD = -1.0;  // std ≈ 0.37, was -0.5 (std ≈ 0.61)
+                static constexpr T MIN_LOG_STD = -3.0;       // std ≈ 0.05 (very deterministic at convergence)
+                static constexpr T MAX_LOG_STD = 0.0;        // std = 1.0 max
                 
                 // Advantage normalization
                 static constexpr bool NORMALIZE_ADVANTAGE = true;
@@ -88,9 +101,9 @@ namespace learning_to_fly {
                 static constexpr bool CLIP_VALUE_LOSS = true;
                 static constexpr T VALUE_CLIP_RANGE = 0.2;
                 
-                // Learning rates
-                static constexpr T ACTOR_LEARNING_RATE = 5e-5;
-                static constexpr T CRITIC_LEARNING_RATE = 1e-4;
+                // Learning rates (slightly higher for faster convergence)
+                static constexpr T ACTOR_LEARNING_RATE = 3e-4;
+                static constexpr T CRITIC_LEARNING_RATE = 1e-3;
             };
 
             /**

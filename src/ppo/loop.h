@@ -30,6 +30,7 @@
 #include "rollout_buffer.h"
 #include "gae.h"
 #include "operations_generic.h"
+#include "observation_normalizer.h"
 
 #include <rl_tools/rl/environments/operations_generic.h>
 #include <rl_tools/nn/operations_generic.h>
@@ -119,6 +120,9 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         T avg_entropy;
         T avg_clip_fraction;
         T avg_approx_kl;
+        
+        // Observation normalizer for training stability
+        ObservationNormalizer<T, TI, CONFIG::OBSERVATION_DIM> obs_normalizer;
     };
 
     /**
@@ -182,6 +186,9 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         ts.avg_entropy = 0;
         ts.avg_clip_fraction = 0;
         ts.avg_approx_kl = 0;
+        
+        // Initialize observation normalizer
+        ts.obs_normalizer.init();
     }
 
     /**
@@ -203,7 +210,17 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         // Get observation from current state into matrix
         rlt::observe(ts.device, ts.envs[env_idx], ts.states[env_idx], ts.single_obs_matrix, ts.rng);
         
-        // Copy observation to buffer
+        // Update observation normalizer with raw observation
+        T raw_obs[OBSERVATION_DIM];
+        for (TI i = 0; i < OBSERVATION_DIM; i++) {
+            raw_obs[i] = rlt::get(ts.single_obs_matrix, 0, i);
+        }
+        ts.obs_normalizer.update(raw_obs);
+        
+        // Normalize observation in-place
+        ts.obs_normalizer.normalize_matrix(ts.device, ts.single_obs_matrix);
+        
+        // Copy NORMALIZED observation to buffer (for PPO update consistency)
         T* obs = get_observation(buffer, idx);
         for (TI i = 0; i < OBSERVATION_DIM; i++) {
             obs[i] = rlt::get(ts.single_obs_matrix, 0, i);
@@ -242,8 +259,9 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         buffer.rewards[idx] = reward;
         buffer.dones[idx] = terminated ? (T)1 : (T)0;
         
-        // Store next observation
+        // Store next observation (normalized)
         rlt::observe(ts.device, ts.envs[env_idx], ts.next_states[env_idx], ts.single_obs_matrix, ts.rng);
+        ts.obs_normalizer.normalize_matrix(ts.device, ts.single_obs_matrix);
         T* next_obs = get_next_observation(buffer, idx);
         for (TI i = 0; i < OBSERVATION_DIM; i++) {
             next_obs[i] = rlt::get(ts.single_obs_matrix, 0, i);
@@ -291,9 +309,10 @@ namespace rl_tools::rl::algorithms::ppo::loop {
         
         ts.rollout_buffer.full = true;
         
-        // Compute last values for GAE bootstrap
+        // Compute last values for GAE bootstrap (using normalized observations)
         for (TI env_idx = 0; env_idx < CONFIG::N_ENVIRONMENTS; env_idx++) {
             rlt::observe(ts.device, ts.envs[env_idx], ts.states[env_idx], ts.single_obs_matrix, ts.rng);
+            ts.obs_normalizer.normalize_matrix(ts.device, ts.single_obs_matrix);
             rlt::evaluate(ts.device, ts.actor_critic.critic, ts.single_obs_matrix, ts.single_value_matrix, ts.single_critic_buffer);
             ts.last_values[env_idx] = rlt::get(ts.single_value_matrix, 0, 0);
             ts.last_dones[env_idx] = 0;  // Not done yet
