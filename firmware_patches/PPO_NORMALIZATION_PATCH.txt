@@ -1,0 +1,146 @@
+--- PATCH FOR PPO OBSERVATION NORMALIZATION ---
+File: rl_tools_adapter.cpp (in learning_to_fly_controller firmware)
+
+PROBLEM:
+========
+PPO policies are trained with normalized observations (mean=0, std=1), but the
+firmware feeds raw observations directly to the actor network. This causes
+PPO policies to produce incorrect actions, resulting in unstable flight.
+
+ROOT CAUSE:
+===========
+The PPO checkpoint exports normalization parameters in `actor.h`:
+  - rl_tools::checkpoint::observation_normalizer::mean[146]
+  - rl_tools::checkpoint::observation_normalizer::std_inv[146]
+  - rl_tools::checkpoint::observation_normalizer::normalize(float* obs)
+
+But rl_tools_control() in rl_tools_adapter.cpp never calls normalize().
+
+MINIMAL FIX:
+============
+In rl_tools_adapter.cpp, modify the rl_tools_control() function.
+
+BEFORE (around line 105-115):
+-----------------------------
+void rl_tools_control(float* state, float* actions){
+    rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, 1, 13, 
+        rlt::matrix::layouts::RowMajorAlignment<TI, 1>>> state_matrix = {(T*)state};
+    auto state_rotation_matrix_input = rlt::view(device, input, 
+        rlt::matrix::ViewSpec<1, 18>{}, 0, 0);
+    observe_rotation_matrix(state_matrix, state_rotation_matrix_input);
+    
+    // ... action history code ...
+    
+    rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, 1, ACTOR_TYPE::SPEC::OUTPUT_DIM, 
+        rlt::matrix::layouts::RowMajorAlignment<TI, 1>>> output = {(T*)actions};
+    rlt::evaluate(device, rlt::checkpoint::actor::model, input, output, buffers);
+
+
+AFTER (add normalization before evaluate):
+------------------------------------------
+void rl_tools_control(float* state, float* actions){
+    rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, 1, 13, 
+        rlt::matrix::layouts::RowMajorAlignment<TI, 1>>> state_matrix = {(T*)state};
+    auto state_rotation_matrix_input = rlt::view(device, input, 
+        rlt::matrix::ViewSpec<1, 18>{}, 0, 0);
+    observe_rotation_matrix(state_matrix, state_rotation_matrix_input);
+    
+    // ... action history code ...
+    
+    // ========================================================================
+    // PPO FIX: Apply observation normalization before inference
+    // ========================================================================
+#ifdef RL_TOOLS_PPO
+    {
+        // Extract input data, normalize, write back
+        T input_buffer[ACTOR_TYPE::SPEC::INPUT_DIM];
+        for (TI i = 0; i < ACTOR_TYPE::SPEC::INPUT_DIM; i++) {
+            input_buffer[i] = rlt::get(input, 0, i);
+        }
+        rlt::checkpoint::observation_normalizer::normalize(input_buffer);
+        for (TI i = 0; i < ACTOR_TYPE::SPEC::INPUT_DIM; i++) {
+            rlt::set(input, 0, i, input_buffer[i]);
+        }
+    }
+#endif
+    // ========================================================================
+    
+    rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, 1, ACTOR_TYPE::SPEC::OUTPUT_DIM, 
+        rlt::matrix::layouts::RowMajorAlignment<TI, 1>>> output = {(T*)actions};
+    rlt::evaluate(device, rlt::checkpoint::actor::model, input, output, buffers);
+
+
+BUILD INSTRUCTIONS:
+===================
+When building PPO firmware, add -DRL_TOOLS_PPO to CXXFLAGS:
+
+Option 1: Modify CMakeLists.txt or Makefile:
+  target_compile_definitions(your_target PRIVATE RL_TOOLS_PPO)
+
+Option 2: Add to build command:
+  make CXXFLAGS="-DRL_TOOLS_PPO"
+
+Option 3: Modify Dockerfile_build_firmware to add the define when building PPO.
+
+
+ALTERNATIVE: AUTO-DETECT PPO
+============================
+Instead of using a compile-time define, auto-detect based on algorithm metadata
+in actor.h. Add this at the top of rl_tools_adapter.cpp after includes:
+
+// Auto-detect PPO from checkpoint metadata
+namespace _ppo_auto_detect {
+    // Check if observation_normalizer namespace exists
+    template<typename T = void>
+    constexpr bool has_normalizer() {
+        // This will be true if observation_normalizer::DIM is defined
+        return true; // For PPO checkpoints
+    }
+}
+
+// Then use constexpr if (C++17) or SFINAE in rl_tools_control()
+
+
+VERIFICATION:
+=============
+After applying the patch:
+
+1. Print first few normalized observation values for debugging:
+   Add DEBUG_PRINT("norm obs[0-2]: %f %f %f", input_buffer[0], input_buffer[1], input_buffer[2]);
+   
+2. Expected ranges after normalization:
+   - All values should be roughly in [-5, +5] range (clipped to [-10, +10])
+   - Position obs[0-2] should NOT be raw meters like [-0.15, 0.02, 0.01]
+   - Instead should be normalized like [0.5, -0.2, 1.3]
+
+3. Compare motor outputs:
+   - TD3: should be similar
+   - PPO without patch: all motors near max (full throttle crash)
+   - PPO with patch: similar to TD3, stable hover actions
+
+
+DIFF (git format):
+==================
+--- a/src/rl_tools_adapter.cpp
++++ b/src/rl_tools_adapter.cpp
+@@ -103,6 +103,19 @@ void rl_tools_control(float* state, float* actions){
+             action_history[step_i][action_i] = action_history[step_i + 1][action_i];
+         }
+     }
++
++    // PPO: Apply observation normalization before inference
++#ifdef RL_TOOLS_PPO
++    {
++        T input_buffer[ACTOR_TYPE::SPEC::INPUT_DIM];
++        for (TI i = 0; i < ACTOR_TYPE::SPEC::INPUT_DIM; i++) {
++            input_buffer[i] = rlt::get(input, 0, i);
++        }
++        rlt::checkpoint::observation_normalizer::normalize(input_buffer);
++        for (TI i = 0; i < ACTOR_TYPE::SPEC::INPUT_DIM; i++) {
++            rlt::set(input, 0, i, input_buffer[i]);
++        }
++    }
++#endif
+ 
+     rlt::MatrixDynamic<rlt::matrix::Specification<T, TI, 1, ACTOR_TYPE::SPEC::OUTPUT_DIM, 
+         rlt::matrix::layouts::RowMajorAlignment<TI, 1>>> output = {(T*)actions};
