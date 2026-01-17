@@ -163,7 +163,7 @@ namespace rl_tools::rl::algorithms::ppo {
         const std::string& name_prefix
     ) {
         std::stringstream ss;
-        ss << std::setprecision(10);
+        ss << std::setprecision(10) << std::fixed;  // Fixed-point ensures decimal point always present
         
         ss << "namespace " << name_prefix << "::observation_normalizer {\n";
         ss << "    constexpr int DIM = " << DIM << ";\n";
