@@ -42,7 +42,7 @@ _hovering = False
 def signal_handler(sig, frame):
     """Handle Ctrl+C immediately"""
     global _running
-    print("\n\n🛑 EMERGENCY STOP!")
+    print("\n\n---EMERGENCY STOP ---")
     _running = False
     if _scf and _scf.cf.link:
         _scf.cf.commander.send_stop_setpoint()
@@ -107,12 +107,12 @@ def test_hover_deadman(uri: str, height: float = 0.3):
                     if key == ' ' or key == '\r' or key == '\n':
                         last_key_time = time.time()
                         if not _hovering:
-                            print("🚁 HOVERING...")
+                            print("--- HOVERING... ---")
                             _hovering = True
                 
                 # Check if key is still being "held" (received recently)
                 if _hovering and (time.time() - last_key_time) > KEY_TIMEOUT:
-                    print("⬇️  STOPPED")
+                    print("--- STOPPED ---")
                     _hovering = False
                     cf.commander.send_stop_setpoint()
                 
@@ -124,7 +124,7 @@ def test_hover_deadman(uri: str, height: float = 0.3):
             
             # Final stop
             cf.commander.send_stop_setpoint()
-            print("✅ Test ended safely")
+            print("--- Test ended safely ---")
             
     finally:
         # Restore terminal on Linux
@@ -160,7 +160,7 @@ if __name__ == '__main__':
         print("=" * 50)
         print(f"Height: {args.height}m")
         print()
-        print("⚠️  SAFETY WARNING ⚠️")
+        print("--- SAFETY WARNING ---")
         print("- Hold SPACE or ENTER to hover")
         print("- RELEASE to immediately stop motors")
         print("- Press Q or ESC to quit")
