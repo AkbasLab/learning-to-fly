@@ -34,19 +34,43 @@ except ImportError:
 # Default URI - change if needed
 DEFAULT_URI = 'radio://0/80/2M/E7E7E7E7E7'
 
+# Connection settings
+CONNECTION_TIMEOUT = 5.0  # seconds to wait for connection
+PACKET_LOSS_THRESHOLD = 10  # consecutive lost packets before disconnect
+
 # Global state
 _scf = None
+_cf = None
 _running = True
 _hovering = False
+_connected = False
+_consecutive_failures = 0
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C immediately"""
     global _running
-    print("\n\n---EMERGENCY STOP ---")
+    print("\n\n--- EMERGENCY STOP ---")
     _running = False
-    if _scf and _scf.cf.link:
-        _scf.cf.commander.send_stop_setpoint()
+    safe_disconnect()
     sys.exit(0)
+
+def safe_disconnect():
+    """Safely disconnect from the Crazyflie"""
+    global _cf, _scf, _connected
+    try:
+        if _cf and _connected:
+            try:
+                _cf.commander.send_stop_setpoint()
+            except:
+                pass
+        if _cf and _cf.link:
+            try:
+                _cf.close_link()
+            except:
+                pass
+    except:
+        pass
+    _connected = False
 
 signal.signal(signal.SIGINT, signal_handler)
 
@@ -55,12 +79,12 @@ def test_hover_deadman(uri: str, height: float = 0.3):
     Dead-man's switch hover test.
     Hover only while SPACE is held (or any key on Windows).
     """
-    global _scf, _running, _hovering
+    global _scf, _cf, _running, _hovering, _connected, _consecutive_failures
     
     print(f"Initializing drivers...")
     cflib.crtp.init_drivers()
     
-    print(f"Connecting to {uri}...")
+    print(f"Connecting to {uri} (timeout: {CONNECTION_TIMEOUT}s)...")
     
     # Set up terminal for raw input on Linux
     if PLATFORM == "linux":
@@ -68,70 +92,138 @@ def test_hover_deadman(uri: str, height: float = 0.3):
         tty.setraw(sys.stdin.fileno())
     
     try:
-        with SyncCrazyflie(uri, cf=Crazyflie(rw_cache='./cache')) as scf:
-            _scf = scf
-            cf = scf.cf
-            
-            print("Connected!")
-            print("")
-            print("=" * 50)
-            print("  DEAD-MAN'S SWITCH MODE")
-            print("=" * 50)
-            print("  HOLD SPACE = Hover")
-            print("  RELEASE    = Stop motors")
-            print("  Q or ESC   = Quit")
-            print("=" * 50)
-            print("")
-            
-            # Unlock commander
-            cf.commander.send_setpoint(0, 0, 0, 0)
+        # Create Crazyflie instance with callbacks
+        cf = Crazyflie(rw_cache='./cache')
+        _cf = cf
+        
+        # Connection state tracking
+        connection_complete = threading.Event()
+        connection_failed = threading.Event()
+        
+        def on_connected(link_uri):
+            global _connected
+            _connected = True
+            connection_complete.set()
+        
+        def on_connection_failed(link_uri, msg):
+            print(f"\nConnection failed: {msg}")
+            connection_failed.set()
+        
+        def on_disconnected(link_uri):
+            global _connected, _running
+            if _connected:
+                print("\n--- DRONE DISCONNECTED ---")
+            _connected = False
+            _running = False
+        
+        def on_link_quality(quality):
+            global _consecutive_failures
+            if quality < 10:  # Very low link quality
+                _consecutive_failures += 1
+            else:
+                _consecutive_failures = 0
+        
+        # Register callbacks
+        cf.connected.add_callback(on_connected)
+        cf.connection_failed.add_callback(on_connection_failed)
+        cf.disconnected.add_callback(on_disconnected)
+        cf.link_quality_updated.add_callback(on_link_quality)
+        
+        # Open link
+        cf.open_link(uri)
+        
+        # Wait for connection with timeout
+        start_time = time.time()
+        while not connection_complete.is_set() and not connection_failed.is_set():
+            if time.time() - start_time > CONNECTION_TIMEOUT:
+                print(f"\n--- CONNECTION TIMEOUT ({CONNECTION_TIMEOUT}s) ---")
+                cf.close_link()
+                return
             time.sleep(0.1)
+        
+        if connection_failed.is_set():
+            cf.close_link()
+            return
+        
+        print("Connected!")
+        print("")
+        print("=" * 50)
+        print("  DEAD-MAN'S SWITCH MODE")
+        print("=" * 50)
+        print("  HOLD SPACE = Hover")
+        print("  RELEASE    = Stop motors")
+        print("  Q or ESC   = Quit")
+        print("=" * 50)
+        print("")
+        
+        # Unlock commander
+        cf.commander.send_setpoint(0, 0, 0, 0)
+        time.sleep(0.1)
+        
+        last_key_time = 0
+        KEY_TIMEOUT = 0.15  # Stop if no key for 150ms
+        
+        while _running and _connected:
+            # Check for packet loss / drone power off
+            if _consecutive_failures >= PACKET_LOSS_THRESHOLD:
+                print("\n--- LINK LOST (packet loss) ---")
+                break
             
-            last_key_time = 0
-            KEY_TIMEOUT = 0.15  # Stop if no key for 150ms
-            
-            while _running:
-                if key_pressed():
-                    key = get_key()
-                    
-                    # Decode if bytes (Windows)
-                    if isinstance(key, bytes):
-                        key = key.decode('utf-8', errors='ignore')
-                    
-                    # Quit on Q or ESC
-                    if key.lower() == 'q' or key == '\x1b':
-                        print("\nQuitting...")
-                        break
-                    
-                    # Any other key = hover
-                    if key == ' ' or key == '\r' or key == '\n':
-                        last_key_time = time.time()
-                        if not _hovering:
-                            print("--- HOVERING... ---")
-                            _hovering = True
+            if key_pressed():
+                key = get_key()
                 
-                # Check if key is still being "held" (received recently)
-                if _hovering and (time.time() - last_key_time) > KEY_TIMEOUT:
-                    print("--- STOPPED ---")
-                    _hovering = False
+                # Decode if bytes (Windows)
+                if isinstance(key, bytes):
+                    key = key.decode('utf-8', errors='ignore')
+                
+                # Quit on Q or ESC
+                if key.lower() == 'q' or key == '\x1b':
+                    print("\nQuitting...")
+                    break
+                
+                # Any other key = hover
+                if key == ' ' or key == '\r' or key == '\n':
+                    last_key_time = time.time()
+                    if not _hovering:
+                        print("--- HOVERING... ---")
+                        _hovering = True
+            
+            # Check if key is still being "held" (received recently)
+            if _hovering and (time.time() - last_key_time) > KEY_TIMEOUT:
+                print("--- STOPPED ---")
+                _hovering = False
+                try:
                     cf.commander.send_stop_setpoint()
-                
-                # Send commands based on state
-                if _hovering:
+                except:
+                    break
+            
+            # Send commands based on state
+            if _hovering:
+                try:
                     cf.commander.send_hover_setpoint(0, 0, 0, height)
-                
-                time.sleep(0.02)  # 50Hz loop
+                except:
+                    print("\n--- SEND FAILED ---")
+                    break
             
-            # Final stop
+            time.sleep(0.02)  # 50Hz loop
+        
+        # Final stop
+        try:
             cf.commander.send_stop_setpoint()
-            print("--- Test ended safely ---")
+        except:
+            pass
+        print("--- Test ended safely ---")
+        
+        # Close link gracefully
+        cf.close_link()
             
+    except Exception as e:
+        print(f"\nError: {e}")
     finally:
         # Restore terminal on Linux
         if PLATFORM == "linux":
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-        if _scf and _scf.cf.link:
-            _scf.cf.commander.send_stop_setpoint()
+        safe_disconnect()
 
 
 if __name__ == '__main__':
