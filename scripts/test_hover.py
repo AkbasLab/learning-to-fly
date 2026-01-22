@@ -156,6 +156,10 @@ def test_hover_deadman(uri: str, height: float = 0.3):
         print("=" * 50)
         print("")
         
+        # Set the target height for the learned PPO controller
+        cf.param.set_value("rlt.target_z", str(height))
+        print(f"Set rlt.target_z = {height}")
+        
         # Unlock commander
         cf.commander.send_setpoint(0, 0, 0, 0)
         time.sleep(0.1)
@@ -200,6 +204,7 @@ def test_hover_deadman(uri: str, height: float = 0.3):
             # Send commands based on state
             if _hovering:
                 try:
+                    print(f"\rHovering at height: {height}m", end="", flush=True)
                     cf.commander.send_hover_setpoint(0, 0, 0, height)
                 except:
                     print("\n--- SEND FAILED ---")
